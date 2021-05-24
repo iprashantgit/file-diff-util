@@ -12,6 +12,7 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -56,10 +57,12 @@ public class TextComparator {
 
 	@Value("${footer.row.count}")
 	private String footerCount;
-	
+
+	@Value("${sort.column.number}")
+	private String sortColumns;
+
 	@Value("${file.copy.encoding}")
 	private String fileEncoding;
-	
 
 	private ReportDesignHandle design;
 	private ElementFactory factory;
@@ -67,6 +70,9 @@ public class TextComparator {
 	int summaryGridRowCount = 0;
 
 	List<Integer> columnBreakCounts;
+	List<Integer> whiteSpaceBreakCount;
+
+	String[] headers;
 
 	public ReportDesignHandle compareText()
 			throws BirtException, EncryptedDocumentException, InvalidFormatException, IOException, URISyntaxException {
@@ -100,10 +106,10 @@ public class TextComparator {
 			return design;
 		}
 
-		prepareFileForCompare(sourcePath1, tempPath + "/source1Copy.csv", Integer.parseInt(headerCount),
+		prepareFileForCompare(sourcePath1, tempPath + "/source1_sorted.csv", Integer.parseInt(headerCount),
 				Integer.parseInt(footerCount));
 
-		prepareFileForCompare(sourcePath2, tempPath + "/source2Copy.csv", Integer.parseInt(headerCount),
+		prepareFileForCompare(sourcePath2, tempPath + "/source2_sorted.csv", Integer.parseInt(headerCount),
 				Integer.parseInt(footerCount));
 
 		if (Integer.parseInt(headerCount) == 1) {
@@ -111,8 +117,8 @@ public class TextComparator {
 		}
 
 		// compare();
-		LineIterator leftFile = FileUtils.lineIterator(new File(tempPath + "/source1Copy.csv"), fileEncoding);
-		LineIterator rightFile = FileUtils.lineIterator(new File(tempPath + "/source2Copy.csv"), fileEncoding);
+		LineIterator leftFile = FileUtils.lineIterator(new File(tempPath + "/source1_sorted.csv"), fileEncoding);
+		LineIterator rightFile = FileUtils.lineIterator(new File(tempPath + "/source2_sorted.csv"), fileEncoding);
 
 		int rowNum = 0;
 		boolean rowCountMismatch = false;
@@ -130,8 +136,11 @@ public class TextComparator {
 			String left = leftFile.nextLine();
 			String right = rightFile.nextLine();
 
-			compare(rowNum, Arrays.asList(left.split(Pattern.quote(delimiter))), Arrays.asList(right.split(Pattern.quote(delimiter))));
+			compare(rowNum, Arrays.asList(left.split(Pattern.quote(delimiter), -1)),
+					Arrays.asList(right.split(Pattern.quote(delimiter), -1)));
 		}
+
+		highlightWhiteSpaceMismatch();
 
 		if (!rowCountMismatch) {
 			createSummaryGrid();
@@ -140,16 +149,56 @@ public class TextComparator {
 		return design;
 	}
 
+	private void highlightWhiteSpaceMismatch() throws SemanticException {
+		// TODO Auto-generated method stub
+		GridHandle grid = (GridHandle) design.findElement("DetailGrid");
+
+		whiteSpaceBreakCount = new ArrayList<>(Arrays.asList(new Integer[headers.length]));
+		Collections.fill(whiteSpaceBreakCount, 0);
+
+		int columnCount = grid.getColumnCount();
+		int rowCount = grid.getRows().getCount();
+
+		for (int i = 2; i < rowCount; i = i + 2) {
+			for (int j = 2; j <= columnCount; j++) {
+				CellHandle cell1 = grid.getCell(i, j);
+				CellHandle cell2 = grid.getCell(i + 1, j);
+
+				if (cell1.getContent().getCount() != 0 && cell2.getContent().getCount() != 0) {
+
+					TextItemHandle text1 = (TextItemHandle) cell1.getContent().get(0);
+					TextItemHandle text2 = (TextItemHandle) cell2.getContent().get(0);
+
+					if (text1.getContent().trim().equals(text2.getContent().trim())) {
+
+						whiteSpaceBreakCount.set(j - 2, whiteSpaceBreakCount.get(j - 2) + 1);
+
+						cell1.setOnRender("this.getStyle().backgroundColor = \"Green\"");
+						cell2.setOnRender("this.getStyle().backgroundColor = \"Green\"");
+
+					}
+
+				}
+
+			}
+		}
+
+	}
+
 	private void createSummaryGrid() throws SemanticException {
 
 		GridHandle grid = (GridHandle) design.findElement("SummaryGrid");
-		RowOperationParameters rowParam = new RowOperationParameters(1, 0, 1);
-		grid.insertRow(rowParam);
 
 		for (int i = 0; i < columnBreakCounts.size(); i++) {
-			CellHandle cell = grid.getCell(2, i + 1);
+			CellHandle cell = grid.getCell(i + 2, 2);
 			TextItemHandle textElement = factory.newTextItem(null);
 			textElement.setContent(Integer.toString(columnBreakCounts.get(i)));
+			cell.getContent().add(textElement);
+			cell.setProperty("style", "cell");
+
+			cell = grid.getCell(i + 2, 3);
+			textElement = factory.newTextItem(null);
+			textElement.setContent(Integer.toString(whiteSpaceBreakCount.get(i)));
 			cell.getContent().add(textElement);
 			cell.setProperty("style", "cell");
 		}
@@ -158,10 +207,8 @@ public class TextComparator {
 
 	private void compare(int rowNum, List<String> left, List<String> right) throws IOException, SemanticException {
 
-		//System.out.println(left);
-		//System.out.println(right);
-		
-		
+		System.out.println("rowNum: " + rowNum + ", left: " + left + ", right: " + right);
+
 		if (left.size() != right.size()) {
 			// addColumnMismatch(rowNum, left.size(), right.size());
 			System.out.println("Warning: Column Count does not match between the files for Row Number " + rowNum);
@@ -175,17 +222,18 @@ public class TextComparator {
 				.mapToObj(i -> right.get(i)).collect(Collectors.toList());
 
 		List<Integer> mismatchColumnIndex = IntStream.range(0, left.size())
-				.mapToObj(i -> left.get(i) + "::" + (i + 1) + "::" + right.get(i))
-				.filter(e -> !e.split("::")[0].equals(e.split("::")[2]))
-				.mapToInt(e -> Integer.valueOf(e.split("::")[1])).mapToObj(e -> e).collect(Collectors.toList());
+				.mapToObj(i -> left.get(i) + delimiter + (i + 1) + delimiter + right.get(i))
+				.filter(e -> !e.split(Pattern.quote(delimiter), -1)[0].equals(e.split(Pattern.quote(delimiter), -1)[2]))
+				.mapToInt(e -> Integer.valueOf(e.split(Pattern.quote(delimiter), -1)[1])).mapToObj(e -> e)
+				.collect(Collectors.toList());
 
 		if (mismatchColumnIndex.size() == 0) {
 			return;
 		}
 
-		 //System.out.println(leftMismatch);
-		 //System.out.println(rightMismatch);
-		 //System.out.println(mismatchColumnIndex);
+		// System.out.println(leftMismatch);
+		// System.out.println(rightMismatch);
+		// System.out.println(mismatchColumnIndex);
 
 		addLineMismatch(rowNum, leftMismatch, rightMismatch, mismatchColumnIndex);
 
@@ -203,11 +251,12 @@ public class TextComparator {
 		CellHandle cell = grid.getCell(detailGridRowCount, 1);
 		TextItemHandle textElement = factory.newTextItem(null);
 		textElement.setContent(Integer.toString(rowNum));
+		// System.out.println(textElement.getContent());
 		cell.getContent().add(textElement);
 		cell.setProperty("style", "cell");
 
 		for (int i = 0; i < mismatchColumnIndex.size(); i++) {
-			cell = grid.getCell(detailGridRowCount, mismatchColumnIndex.get(i)+1);
+			cell = grid.getCell(detailGridRowCount, mismatchColumnIndex.get(i) + 1);
 			textElement = factory.newTextItem(null);
 			textElement.setContent(leftMismatch.get(i));
 			cell.getContent().add(textElement);
@@ -226,7 +275,7 @@ public class TextComparator {
 		cell.setProperty("style", "cell");
 
 		for (int i = 0; i < mismatchColumnIndex.size(); i++) {
-			cell = grid.getCell(detailGridRowCount, mismatchColumnIndex.get(i)+1);
+			cell = grid.getCell(detailGridRowCount, mismatchColumnIndex.get(i) + 1);
 			textElement = factory.newTextItem(null);
 			textElement.setContent(rightMismatch.get(i));
 			cell.getContent().add(textElement);
@@ -245,19 +294,17 @@ public class TextComparator {
 		detailGridRowCount++;
 
 		Path path = Paths.get(sourcePath);
-		
 
-		Charset cs = Charset.forName(fileEncoding);  
+		Charset cs = Charset.forName(fileEncoding);
 
 		Stream<String> lines = Files.lines(path, cs);
-		
 
-		String[] headers = lines.limit(1).collect(Collectors.joining()).split(Pattern.quote(delimiter));
+		headers = lines.limit(1).collect(Collectors.joining()).split(Pattern.quote(delimiter), -1);
 
-		for(String e : headers) {
-			//System.out.println(e);
-		}
-		
+//		for(String e : headers) {
+//			System.out.println(e);
+//		}
+
 		TextItemHandle text = factory.newTextItem(null);
 
 		GridHandle detailGrid = factory.newGridItem("DetailGrid", headers.length + 1, 1);
@@ -278,15 +325,35 @@ public class TextComparator {
 
 		design.getBody().add(detailGrid);
 
-		GridHandle summaryGrid = factory.newGridItem("SummaryGrid", headers.length, 1);
+		GridHandle summaryGrid = factory.newGridItem("SummaryGrid", 3, headers.length + 1);
+
+		cell = summaryGrid.getCell(1, 1);
+		text = factory.newTextItem(null);
+		text.setContent("Column Name");
+		cell.getContent().add(text);
+		cell.setProperty("style", "header-cell");
+
+		cell = summaryGrid.getCell(1, 2);
+		text = factory.newTextItem(null);
+		text.setContent("Break Count");
+		cell.getContent().add(text);
+		cell.setProperty("style", "header-cell");
+
+		cell = summaryGrid.getCell(1, 3);
+		text = factory.newTextItem(null);
+		text.setContent("Whitespace Break Count");
+		cell.getContent().add(text);
+		cell.setProperty("style", "header-cell");
 
 		for (int i = 0; i < headers.length; i++) {
-			cell = summaryGrid.getCell(1, i + 1);
+			cell = summaryGrid.getCell(i + 2, 1);
 			text = factory.newTextItem(null);
 			text.setContent(headers[i]);
 			cell.getContent().add(text);
-			cell.setProperty("style", "header-cell");
+			cell.setProperty("style", "cell");
 		}
+
+		detailGrid.setOnPrepare("this.getStyle().pageBreakAfter = \"always\"");
 
 		design.getBody().add(summaryGrid);
 
@@ -303,15 +370,67 @@ public class TextComparator {
 		Path path = Paths.get(filePath);
 
 		Path copyPath = Paths.get(fileCopyPath);
-		
-		Charset cs = Charset.forName(fileEncoding);  
+
+		Charset cs = Charset.forName(fileEncoding);
 
 		Stream<String> lines = Files.lines(path, cs);
 
 		int rowCount = (int) Files.lines(path, cs).count();
 
-		List<String> sortedLines = lines.limit(rowCount - footerCount).skip(headerCount).sorted()
-				.collect(Collectors.toList());
+		String[] sortColumnsArray = sortColumns.split(Pattern.quote(","));
+
+		// System.out.println(sortColumnsArray[0] + "||" + sortColumnsArray[1]);
+
+		List<String> sortedLines = lines.limit(rowCount - footerCount).skip(headerCount)
+				.sorted(new Comparator<String>() {
+					@Override
+					public int compare(String l1, String l2) {
+
+						String substringL1 = "";
+
+						int count = 0;
+
+						// Counts each character except space
+						for (int i = 0; i < l1.length(); i++) {
+							if (l1.charAt(i) == delimiter.charAt(0))
+								count++;
+						}
+
+						System.out.println(count);
+
+						for (int i = 0; i < sortColumnsArray.length; i++) {
+
+							if (Integer.parseInt(sortColumnsArray[i]) == 1) {
+								substringL1 += l1.substring(0, l1.indexOf(delimiter));
+							} else if (Integer.parseInt(sortColumnsArray[i]) == count) {
+								substringL1 += l1.substring(l1.lastIndexOf(delimiter));
+							} else {
+								substringL1 += l1.substring(l1.indexOf(delimiter) + 1, l1.indexOf(delimiter,
+										l1.indexOf(delimiter) + Integer.parseInt(sortColumnsArray[i]) + 1));
+							}
+
+							System.out.println(i + ": " + substringL1);
+						}
+
+						String substringL2 = "";
+
+						for (int i = 0; i < sortColumnsArray.length; i++) {
+							if (Integer.parseInt(sortColumnsArray[i]) == 1) {
+								substringL2 += l2.substring(0, l2.indexOf(delimiter));
+							} else if (Integer.parseInt(sortColumnsArray[i]) == count) {
+								substringL2 += l2.substring(l2.lastIndexOf(delimiter));
+							} else {
+								substringL2 += l2.substring(l2.indexOf(delimiter) + 1, l2.indexOf(delimiter,
+										l2.indexOf(delimiter) + Integer.parseInt(sortColumnsArray[i]) + 1));
+							}
+
+						}
+
+						// System.out.println(substringL2);
+
+						return substringL1.compareTo(substringL2);
+					}
+				}).collect(Collectors.toList());
 
 		Files.write(copyPath, sortedLines);
 
